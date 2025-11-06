@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: agentic_rabbitmq
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-agent}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-agentpass}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: agentic_redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    container_name: agentic_worker
+    env_file: .env
+    environment:
+      BROKER_URL: amqp://${RABBIT_USER:-agent}:${RABBIT_PASS:-agentpass}@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
+      UM_REDIS_HOST: redis
+      UM_REDIS_PORT: 6379
+      UM_NAMESPACE: Agentic_Work_Shop
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+    command: ["/app/docker/worker/start-worker.sh"]
+    deploy:
+      replicas: 1

@@ -1,0 +1,11 @@
+python-dotenv>=1.0.0
+celery==5.4.0
+redis==5.0.8
+kombu==5.3.5
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+pydantic>=2.7.0
+numpy
+sentence-transformers~=3.0.1
+pytest

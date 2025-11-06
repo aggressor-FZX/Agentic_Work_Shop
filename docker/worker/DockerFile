@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git curl && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy only scripts that run at container start; app code is bind-mounted
+COPY docker/worker/start-worker.sh /app/docker/worker/start-worker.sh
+RUN chmod +x /app/docker/worker/start-worker.sh
