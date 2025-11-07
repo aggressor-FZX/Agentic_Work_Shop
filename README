@@ -1,0 +1,205 @@
+Of course, here is the content formatted as a Markdown file. You can copy and paste the text below into a file and save it with a `.md` extension to use it as a Markdown document.
+
+***
+
+# Scaling Your Setup: A Concrete Example
+
+This document walks through a simple, concrete example of giving an orchestrator a goal (like “build a project”) inside a subdirectory of your current repository.
+
+## 🧩 Scenario
+
+You are in the following directory:
+
+```bash
+~/cpts_483/Agentic_Work_Shop/
+```
+
+And you have a subproject with this structure:
+
+```
+Agentic_Work_Shop/
+└── projects/
+    └── verilog_adder/
+        ├── src/
+        ├── tests/
+        └── README.md
+```
+
+Your goal is to have the AI worker: **“Build and test everything inside `projects/verilog_adder`”** while leaving the main `Agentic_Work_Shop` folder untouched.
+
+---
+
+### 🧱 Step 1: Start Infrastructure
+
+From the `Agentic_Work_Shop` root directory, run the following command to start the necessary services:
+
+```bash
+docker compose up -d --build
+```
+
+✅ This command starts:
+
+*   **RabbitMQ** (the job queue)
+*   **Redis** (the memory store)
+*   **Worker** (the AI agent executor)
+
+---
+
+### 🧠 Step 2: Create a Simple Goal
+
+Next, let's tell the AI to build the subproject in the specified folder.
+
+First, activate your Python virtual environment:
+
+```bash
+source .venv/bin/activate
+```
+
+Now, run the `enqueue.py` script with your goal:
+
+```bash
+python enqueue.py \
+  "Build and test the Verilog adder project" \
+  projects/verilog_adder/src projects/verilog_adder/tests \
+  --iters 3
+```
+
+#### 🧩 What Happens Next
+
+1.  `enqueue.py` packages your goal, scope, and iteration count into a job.
+2.  That job is sent to **RabbitMQ**.
+3.  Your **Celery worker** pulls the job and calls the following function:
+
+    ```python
+    run_manager("Build and test the Verilog adder project",
+                ["projects/verilog_adder/src", "projects/verilog_adder/tests"],
+                max_iter=3)
+    ```
+
+Inside `manager.py` (or `Orchistrate.py`):
+
+*   The **Planner** decides what actions to take.
+*   The **Coder** writes or modifies files, but *only* in `projects/verilog_adder/src`.
+*   Environment and testing tools (like `pytest`, `make`, etc.) run inside that specific folder.
+*   The **Reviewer** validates the changes and finalizes the process.
+
+Everything remains scoped to the `verilog_adder` subdirectory because the orchestrator’s `target_paths` limit all file edits to those specified paths.
+
+---
+
+### 🧾 Step 3: Watch It Work
+
+To see the live logs from the worker, run:
+
+```bash
+docker compose logs -f worker
+```
+
+You can also check the job status in RabbitMQ’s web UI, which is available at:
+
+[http://localhost:15672](http://localhost:15672) (user: `agent`, pass: `agentpass`)
+
+If you are writing logs to a file (e.g., `manager.log`), you can follow the log output with:
+
+```bash
+tail -f manager.log
+```
+
+---
+
+### 🧪 Step 4: Verify the Results
+
+Once the process is complete, you will have:
+
+*   Modified files under `projects/verilog_adder/src` and `tests`.
+*   A result object returned by `run_manager()` (which Celery also stores in Redis).
+
+You can optionally run the tests manually to confirm the results:
+
+```bash
+pytest projects/verilog_adder/tests
+```
+
+---
+
+## 🔄 Development Loop Overview
+
+The Agentic Work Shop uses a structured development loop powered by LangGraph to autonomously implement and test code changes. The loop consists of five main stages that iterate until completion:
+
+### **Loop Stages:**
+
+1. **Plan** → AI analyzes the goal and creates a high-level implementation plan
+2. **Code** → AI generates code changes as unified diffs targeting only specified paths
+3. **Environment** → AI requests necessary tools/dependencies for the task
+4. **Test** → Code changes are applied and tests are run; auto-install missing dependencies if needed
+5. **Review** → AI evaluates test results and decides to iterate or finalize
+
+### **Iteration Logic:**
+- Maximum 3 iterations allowed
+- Loop continues if tests fail AND reviewer requests iteration
+- Loop terminates on test pass + reviewer finalization OR max iterations reached
+
+### **Safety Features:**
+- File modifications limited to specified `target_paths`
+- Tool execution restricted to allowlist
+- Git-based patching with rollback capability
+- Comprehensive logging to `manager.log`
+
+---
+
+## 🤖 Default Agent Prompts
+
+Each agent in the LangGraph workflow uses carefully crafted prompts to ensure focused, safe, and effective AI behavior:
+
+### **Planner Agent**
+```
+Plan steps to achieve:
+Goal: {state['goal']}
+Scope: {state['target_paths']}
+```
+
+### **Environment Agent**
+```
+You can request tools strictly using 'TOOL: <name> <args>'.
+Allowed tools: pip_install, npm_install, pytest, ruff, black_check, flake8, mypy, cmake_build, ctest.
+Goal: {state['goal']}
+Repo paths: {state['target_paths']}
+
+Output only TOOL: lines for dependencies to install or basic setup steps.
+If none needed, output nothing.
+Examples:
+TOOL: pip_install pytest ruff
+TOOL: npm_install jest
+```
+
+### **Coder Agent**
+```
+Goal: {state['goal']}
+Plan:
+{state['plan']}
+Touch only {state['target_paths']}
+Return a single unified diff, no prose.
+```
+
+### **Reviewer Agent**
+```
+Tests: {state['test_result']}
+Logs (tail): {state['test_log'][:2000]}
+
+If FAIL:
+- Provide one-sentence reason,
+- then (optionally) lines starting with 'TOOL:' to install deps or run a specific allowed tool,
+- then finish with either:
+  ACTION:ITERATE <one-line next change>
+If PASS:
+  ACTION:FINALIZE
+
+Allowed tools: pip_install, npm_install, pytest, ruff, black_check, flake8, mypy, cmake_build, ctest.
+```
+
+### **Key Prompt Design Principles:**
+- **Constrained Output**: Agents produce structured, parseable responses
+- **Safety First**: Tool requests use explicit `TOOL:` syntax
+- **Scoped Actions**: File modifications limited to `target_paths`
+- **Iterative Refinement**: Review-based feedback loop
+- **Minimal Prose**: Focus on actionable outputs over explanations
