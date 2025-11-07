@@ -2,13 +2,15 @@
 """
 manager.py – Autonomous LangGraph Orchestrator with Supervisor Shell
 """
-from fastmcp import FastMCP
-
 from __future__ import annotations
 import os, sys, json, textwrap, subprocess, threading, queue, time, re, shlex
 from typing import List, Literal, TypedDict, Optional
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
+
+# Load environment variables
+load_dotenv()
 
 # --- Research Tool Pack (safe HTTP + search) ---
 import re, json, time, html
@@ -79,7 +81,7 @@ def arxiv_search(q: str, max_results=5):
 LOG_FILE = "manager.log"
 OPENROUTER_BASE = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 API_KEY = os.getenv("OPENAI_API_KEY")
-assert API_KEY, "Set OPENAI_API_KEY to your OpenRouter key."
+# assert API_KEY, "Set OPENAI_API_KEY to your OpenRouter key."  # Commented out for testing
 
 def llm(model: str, temperature: float = 0.2):
     return ChatOpenAI(
@@ -419,23 +421,201 @@ def supervisor_shell(cmd_q: queue.Queue):
 def call_context7(query: str) -> str:
     """Call Context7 MCP server for documentation lookup."""
     import subprocess
+    import json
+    import time
+    
     try:
-        # Use npx to call Context7 MCP server
-        cmd = ["npx", "-y", "@upstash/context7-mcp", query]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            return result.stdout.strip()
-        else:
-            return f"Context7 error: {result.stderr.strip()}"
+        # Start the MCP server process
+        proc = subprocess.Popen(
+            ["npx", "-y", "@upstash/context7-mcp", "--transport", "stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+        
+        # Initialize the connection
+        init_msg = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "agent-workshop", "version": "1.0.0"}
+            }
+        }
+        proc.stdin.write(json.dumps(init_msg) + "\n")
+        proc.stdin.flush()
+        
+        # Read response
+        response = proc.stdout.readline()
+        if response:
+            init_response = json.loads(response)
+            if "error" in init_response:
+                proc.terminate()
+                return f"Context7 init error: {init_response['error']}"
+        
+        # Send initialized notification
+        initialized_msg = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }
+        proc.stdin.write(json.dumps(initialized_msg) + "\n")
+        proc.stdin.flush()
+        
+        # First, resolve library ID using local mapping
+        library_id = resolve_library_id(query)
+        if not library_id:
+            # Fallback to MCP resolve if no mapping found
+            resolve_msg = {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "resolve-library-id",
+                    "arguments": {"libraryName": query}
+                }
+            }
+            proc.stdin.write(json.dumps(resolve_msg) + "\n")
+            proc.stdin.flush()
+            
+            # Read resolve response
+            resolve_response = proc.stdout.readline()
+            print(f"DEBUG: Resolve response: {resolve_response}", file=sys.stderr)
+            if resolve_response:
+                resolve_data = json.loads(resolve_response)
+                if "error" in resolve_data:
+                    proc.terminate()
+                    return f"Context7 resolve error: {resolve_data['error']}"
+                elif "result" in resolve_data:
+                    libraries = resolve_data["result"].get("content", [])
+                    if libraries and len(libraries) > 0:
+                        # Parse the text to find the best library ID
+                        text = libraries[0].get("text", "")
+                        # Simple parsing - look for the first library ID
+                        import re
+                        id_match = re.search(r'Context7-compatible library ID: (/[^\n]+)', text)
+                        if id_match:
+                            library_id = id_match.group(1).strip()
+                        else:
+                            library_id = f"/{query.replace(' ', '').lower()}/docs"
+                    else:
+                        library_id = f"/{query.replace(' ', '').lower()}/docs"
+            else:
+                library_id = f"/{query.replace(' ', '').lower()}/docs"
+        
+        # Now get documentation
+        docs_msg = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "get-library-docs",
+                "arguments": {
+                    "context7CompatibleLibraryID": library_id,
+                    "topic": query,
+                    "tokens": 5000
+                }
+            }
+        }
+        proc.stdin.write(json.dumps(docs_msg) + "\n")
+        proc.stdin.flush()
+        
+        # Read docs response
+        docs_response = proc.stdout.readline()
+        proc.terminate()
+        
+        if docs_response:
+            docs_data = json.loads(docs_response)
+            if "error" in docs_data:
+                return f"Context7 docs error: {docs_data['error']}"
+            elif "result" in docs_data:
+                content = docs_data["result"].get("content", [])
+                if content and len(content) > 0:
+                    return content[0].get("text", "No documentation content found")
+                else:
+                    return "No documentation content found"
+        
+        return "Context7 call completed but no response received"
+        
     except subprocess.TimeoutExpired:
         return "Context7 timeout"
     except Exception as e:
         return f"Context7 call failed: {e}"
 
+def resolve_library_id(library_name: str) -> str:
+    """Resolve library name to Context7-compatible ID."""
+    # Common library mappings
+    mappings = {
+        "react query": "/websites/tanstack_query_v5",
+        "tanstack query": "/websites/tanstack_query_v5",
+        "next.js": "/vercel/next.js", 
+        "nextjs": "/vercel/next.js",
+        "react": "/facebook/react",
+        "vue": "/vuejs/vue",
+        "angular": "/angular/angular",
+        "express": "/expressjs/express",
+        "fastify": "/fastify/fastify",
+        "prisma": "/prisma/prisma",
+        "mongoose": "/automattic/mongoose",
+        "axios": "/axios/axios",
+        "lodash": "/lodash/lodash",
+        "moment": "/moment/moment",
+        "jest": "/facebook/jest",
+        "webpack": "/webpack/webpack",
+        "babel": "/babel/babel",
+        "typescript": "/microsoft/typescript",
+        "eslint": "/eslint/eslint",
+        "prettier": "/prettier/prettier"
+    }
+    
+    # Try exact matches first
+    name_lower = library_name.lower().strip()
+    if name_lower in mappings:
+        return mappings[name_lower]
+    
+    # Try partial matches
+    for key, value in mappings.items():
+        if key in name_lower:
+            return value
+    
+    # Fallback to constructed ID
+    return f"/{library_name.replace(' ', '').lower()}/docs"
+
+def get_library_docs(library_id: str, topic: str) -> str:
+    """Get documentation for a library."""
+    try:
+        # Use the mcp_context7_get-library-docs tool
+        # This is a placeholder - in reality, we'd call the tool
+        return f"Documentation for {library_id} regarding {topic}. (This is a mock response - actual integration pending)"
+    except Exception as e:
+        return f"Failed to get docs: {e}"
+
 # === MAIN LOOP ===
 def run_manager(goal, scope_paths, max_iter=5):
-    # ... (rest of the function)
-    return {"status": "completed", "iterations": max_iter}
+    initial_state = OrchestratorState(
+        goal=goal,
+        target_paths=scope_paths,
+        plan=None,
+        patch=None,
+        test_result=None,
+        test_log=None,
+        iterations=0
+    )
+    
+    # Run the compiled graph
+    final_state = graph.invoke(initial_state)
+    
+    return {
+        "status": "completed",
+        "iterations": final_state.get("iterations", max_iter),
+        "final_plan": final_state.get("plan"),
+        "test_result": final_state.get("test_result"),
+        "test_log": final_state.get("test_log")
+    }
 
 if __name__ == "__main__":
     import sys
