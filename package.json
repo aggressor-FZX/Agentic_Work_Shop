@@ -8,6 +8,8 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "dependencies": {},
+  "dependencies": {
+    "@upstash/context7-mcp": "^1.0.0"
+  },
   "description": ""
 }

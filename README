@@ -1,4 +1,7 @@
-Of course, here is the content formatted as a Markdown file. You can copy and paste the text below into a file and save it with a `.md` extension to use it as a Markdown document.
+# Agentic Work Shop
+
+- This was built on WSL Ubuntu for linux. 
+- Refuse to develop on anything else.
 
 ***
 
@@ -30,7 +33,7 @@ Your goal is to have the AI worker: **“Build and test everything inside `proje
 ---
 
 ### 🧱 Step 1: Start Infrastructure
-
+If you don't have it, do a manual install of Compose V2 in WSL
 From the `Agentic_Work_Shop` root directory, run the following command to start the necessary services:
 
 ```bash
@@ -203,3 +206,47 @@ Allowed tools: pip_install, npm_install, pytest, ruff, black_check, flake8, mypy
 - **Scoped Actions**: File modifications limited to `target_paths`
 - **Iterative Refinement**: Review-based feedback loop
 - **Minimal Prose**: Focus on actionable outputs over explanations
+
+---
+
+## 🔍 Context7 Integration
+
+The Agentic Work Shop integrates **Context7 MCP** for up-to-date library and toolkit documentation. Context7 provides live, version-aware documentation that helps agents stay current with rapidly evolving libraries.
+
+### **When Agents Use Context7**
+
+Agents automatically use Context7 when they encounter:
+- Unfamiliar libraries or toolkits
+- Libraries that may have changed in the past 12 months
+- Need for specific API examples or breaking changes
+
+### **Context7 Workflow**
+
+1. **Detection**: Planner/Research agents identify knowledge gaps
+2. **Query**: Use `TOOL: context7_docs "<query>"` for documentation
+3. **Storage**: Results stored in unified memory for reuse
+4. **Integration**: Future agents read from memory for accurate code generation
+
+### **Example Usage**
+
+```
+TOOL: context7_docs "React Query v5 invalidate API"
+TOOL: mem_put docs/react-query-v5 {"text":"...", "source":"context7"}
+TOOL: mem_get docs/react-query-v5  # Later retrieval
+```
+
+### **Installation**
+
+Context7 is included in the project dependencies. For local MCP server usage:
+
+```bash
+npm install
+npx -y @upstash/context7-mcp --api-key YOUR_KEY
+```
+
+### **Benefits**
+
+- **Current Knowledge**: Access to latest library versions and APIs
+- **Memory Integration**: Documentation stored alongside project knowledge
+- **Fallback Safety**: Works alongside web search and paper search tools
+- **Version Awareness**: Handles breaking changes and deprecations

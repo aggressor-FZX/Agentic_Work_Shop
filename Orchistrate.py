@@ -128,6 +128,7 @@ ALLOWED_TOOLS.update({
     "web_search":  lambda args: ["__PY__", "web_search", *args],   # query, [max_results]
     "web_fetch":   lambda args: ["__PY__", "web_fetch", *args],    # url
     "paper_search":lambda args: ["__PY__", "paper_search", *args], # query, [max_results]
+    "context7_docs": lambda args: ["__MCP__", "context7", *args],   # Context7 documentation lookup
 })
 
 def run_tool(tool: str, args_or_pkgs=None, cwd=".", timeout=600):
@@ -171,6 +172,21 @@ def run_tool(tool: str, args_or_pkgs=None, cwd=".", timeout=600):
         except Exception as e:
             return (1, "", f"{type(e).__name__}: {e}")
         return (1, "mem_op_unknown", "")
+
+    # MCP tools (external documentation servers)
+    if spec[0] == "__MCP__":
+        server = spec[1]  # e.g., "context7"
+        query = " ".join(args) if args else ""
+        try:
+            if server == "context7":
+                # Call Context7 MCP server
+                output = call_context7(query)
+                return (0, output, "")
+        except Exception as e:
+            return (1, "", f"MCP {server} error: {e}")
+        return (1, "", f"unknown MCP server: {server}")
+
+    # External shell tools (pip, pytest, etc.) handled as before…
     # shell tools handled as before…
     proc = subprocess.run(spec, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     return (proc.returncode, proc.stdout, proc.stderr)
@@ -217,6 +233,7 @@ If domain knowledge is missing or uncertain, FIRST do research:
   TOOL: web_search <query>
   TOOL: web_fetch <url>
   TOOL: paper_search <query>    # for academic topics
+  TOOL: context7_docs <library query>  # for up-to-date library/tool docs
 - Summarize findings into unified memory:
   TOOL: mem_put research/context {{"text":"<short summary>", "sources":[...]}}
 - Then continue planning and coding.
@@ -237,6 +254,13 @@ If domain knowledge might be insufficient, emit only TOOL lines to:
 - web_search "<query>"
 - web_fetch "<url>"
 - paper_search "<query>"
+- context7_docs "<library or toolkit query>"  # For up-to-date library docs
+
+For libraries/toolkits that may have changed recently (past 12 months), use context7_docs first.
+Examples:
+TOOL: context7_docs "React Query v5 invalidate API"
+TOOL: context7_docs "Next.js 14 app router changes"
+
 Optionally store a short synthesis:
 - mem_put research/context {{"text":"...", "sources":[...]}}
 If no research needed, emit nothing.
@@ -390,6 +414,23 @@ def supervisor_shell(cmd_q: queue.Queue):
             print("Commands: status | pause | resume | quit")
         else:
             print("Unknown command.")
+
+# === CONTEXT7 MCP CALLER ===
+def call_context7(query: str) -> str:
+    """Call Context7 MCP server for documentation lookup."""
+    import subprocess
+    try:
+        # Use npx to call Context7 MCP server
+        cmd = ["npx", "-y", "@upstash/context7-mcp", query]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        else:
+            return f"Context7 error: {result.stderr.strip()}"
+    except subprocess.TimeoutExpired:
+        return "Context7 timeout"
+    except Exception as e:
+        return f"Context7 call failed: {e}"
 
 # === MAIN LOOP ===
 def run_manager(goal, scope_paths, max_iter=5):
