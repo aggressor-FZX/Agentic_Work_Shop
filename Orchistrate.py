@@ -10,6 +10,71 @@ from typing import List, Literal, TypedDict, Optional
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
+# --- Research Tool Pack (safe HTTP + search) ---
+import re, json, time, html
+import requests
+from bs4 import BeautifulSoup
+from readability import Document
+
+HTTP_TIMEOUT = 12
+MAX_BYTES = 800_000  # ~0.8MB per fetch
+ALLOWED_SCHEMES = ("http://", "https://")
+USER_AGENT = "AgenticWorkshop/1.0 (+research bot)"
+
+def ddg_search(query: str, max_results=5):
+    # DuckDuckGo HTML lite endpoint (no API key). Fallback if rate-limited.
+    url = "https://duckduckgo.com/html/"
+    params = {"q": query}
+    r = requests.post(url, data=params, headers={"User-Agent": USER_AGENT}, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "lxml")
+    out = []
+    for a in soup.select(".result__a")[:max_results]:
+        href = a.get("href")
+        title = a.get_text(" ", strip=True)
+        if href and href.startswith(("http://","https://")):
+            out.append({"title": title, "url": href})
+    return out
+
+def http_fetch(url: str, max_bytes=MAX_BYTES):
+    if not url.startswith(ALLOWED_SCHEMES) or "javascript:" in url.lower():
+        return {"error":"blocked scheme"}
+    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=HTTP_TIMEOUT, stream=True)
+    r.raise_for_status()
+    ctype = r.headers.get("Content-Type","")
+    # allow only text/html for readability extraction
+    if "html" not in ctype.lower():
+        # still allow small text
+        text = r.text[: min(MAX_BYTES, 200_000)]
+        return {"url": url, "title": url, "content": text, "note":"non-html content"}
+    # stream-limit
+    acc = bytearray()
+    for chunk in r.iter_content(8192):
+        acc.extend(chunk)
+        if len(acc) > max_bytes:
+            break
+    html_bytes = bytes(acc)
+    doc = Document(html_bytes)
+    title = doc.short_title()
+    article_html = doc.summary()
+    # crude text extraction
+    soup = BeautifulSoup(article_html, "lxml")
+    article_text = soup.get_text("\n", strip=True)
+    return {"url": url, "title": title, "content": article_text[:30000]}
+
+def arxiv_search(q: str, max_results=5):
+    import arxiv as ax
+    results = ax.Search(query=q, max_results=max_results, sort_by=ax.SortCriterion.Relevance).results()
+    out = []
+    for r in results:
+        out.append({
+            "title": r.title,
+            "url": r.entry_id,
+            "published": r.published.strftime("%Y-%m-%d"),
+            "summary": r.summary[:2000]
+        })
+    return out
+
 # === CONFIGURATION ===
 LOG_FILE = "manager.log"
 OPENROUTER_BASE = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
@@ -59,7 +124,10 @@ ALLOWED_TOOLS.update({
     "mem_put":  lambda args: ["__PY__", "mem_put", *args],     # mem_put key JSON
     "mem_get":  lambda args: ["__PY__", "mem_get", *args],     # mem_get key
     "mem_del":  lambda args: ["__PY__", "mem_del", *args],     # mem_del key
-    "mem_search": lambda args: ["__PY__", "mem_search", *args] # mem_search "query" topk
+    "mem_search": lambda args: ["__PY__", "mem_search", *args], # mem_search "query" topk
+    "web_search":  lambda args: ["__PY__", "web_search", *args],   # query, [max_results]
+    "web_fetch":   lambda args: ["__PY__", "web_fetch", *args],    # url
+    "paper_search":lambda args: ["__PY__", "paper_search", *args], # query, [max_results]
 })
 
 def run_tool(tool: str, args_or_pkgs=None, cwd=".", timeout=600):
@@ -87,6 +155,21 @@ def run_tool(tool: str, args_or_pkgs=None, cwd=".", timeout=600):
             hits = UM.search(query, topk=topk)
             # compact print
             return (0, json.dumps([{"key":k,"score":s,"value":v} for k,s,v in hits]), "")
+        try:
+            if op == "web_search":
+                q = " ".join(args) if args else ""
+                hits = ddg_search(q, max_results=5)
+                return (0, json.dumps(hits, ensure_ascii=False), "")
+            if op == "web_fetch":
+                url = args[0]
+                doc = http_fetch(url)
+                return (0, json.dumps(doc, ensure_ascii=False), "")
+            if op == "paper_search":
+                q = " ".join(args) if args else ""
+                hits = arxiv_search(q, max_results=5)
+                return (0, json.dumps(hits, ensure_ascii=False), "")
+        except Exception as e:
+            return (1, "", f"{type(e).__name__}: {e}")
         return (1, "mem_op_unknown", "")
     # shell tools handled as before…
     proc = subprocess.run(spec, cwd=cwd, capture_output=True, text=True, timeout=timeout)
@@ -127,10 +210,43 @@ def plan_node(state: OrchestratorState):
     planner = llm("deepseek-v3")
     prompt = f"""Plan steps to achieve:
 Goal: {state['goal']}
-Scope: {state['target_paths']}"""
+Scope: {state['target_paths']}
+
+If domain knowledge is missing or uncertain, FIRST do research:
+- Use: 
+  TOOL: web_search <query>
+  TOOL: web_fetch <url>
+  TOOL: paper_search <query>    # for academic topics
+- Summarize findings into unified memory:
+  TOOL: mem_put research/context {{"text":"<short summary>", "sources":[...]}}
+- Then continue planning and coding.
+
+Always cite 2–5 sources (store in memory) before proposing architecture in unfamiliar domains."""
     plan = planner.invoke(prompt).content.strip()
     log_event("plan", plan)
     return {**state, "plan": plan}
+
+def research_node(state: OrchestratorState):
+    planner = llm("deepseek-v3")  # or your preferred planner model
+    prompt = f"""
+Goal: {state['goal']}
+Known constraints: {state.get('constraints','(none)')}
+Current plan (if any): {state.get('plan','(none)')}
+
+If domain knowledge might be insufficient, emit only TOOL lines to:
+- web_search "<query>"
+- web_fetch "<url>"
+- paper_search "<query>"
+Optionally store a short synthesis:
+- mem_put research/context {{"text":"...", "sources":[...]}}
+If no research needed, emit nothing.
+"""
+    out = planner.invoke(prompt).content
+    for tool, args in parse_tool_requests(out):
+        rc, so, se = run_tool(tool, args)
+        log_event("research_tool", f"{tool} {args}\nRC={rc}\n{so[:800]}\n{se[:400]}")
+        # Encourage storing condensed notes
+    return state
 
 def env_node(state: OrchestratorState):
     # Ask planner to declare minimal tools/deps needed in TOOL: lines
@@ -245,12 +361,14 @@ def should_iterate(state: OrchestratorState) -> Literal["iterate","finish"]:
 # === BUILD GRAPH ===
 workflow = StateGraph(OrchestratorState)
 workflow.add_node("plan", plan_node)
+workflow.add_node("research", research_node)
 workflow.add_node("code", code_node)
 workflow.add_node("env", env_node)      # <— NEW
 workflow.add_node("test", test_node)
 workflow.add_node("review", review_node)
 workflow.set_entry_point("plan")
-workflow.add_edge("plan", "code")
+workflow.add_edge("plan", "research")
+workflow.add_edge("research", "code")
 workflow.add_edge("code", "env")      # <— NEW
 workflow.add_edge("env", "test")      # <— NEW
 workflow.add_edge("test", "review")
