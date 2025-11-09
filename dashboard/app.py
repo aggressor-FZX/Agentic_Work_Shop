@@ -25,6 +25,9 @@ worker_processes = {}
 monitoring_active = False
 monitor_thread = None
 
+# Worker health tracking
+worker_health = {}
+
 # Cost tracking
 total_cost = 0.0
 free_models_used = 0
@@ -47,6 +50,25 @@ MODEL_PRICING = {
     'qwen/qwen3-32b:thinking': {'input': 0.29, 'output': 0.59, 'tier': 'Level 4'},
     'free': {'input': 0, 'output': 0, 'tier': 'Free'}
 }
+
+# Cost optimization: prioritize free and cheap models
+FREE_MODELS = [
+    'minimax/minimax-m2:free',
+    'deepseek/deepseek-v1:free',
+    'deepseek/deepseek-v2:free', 
+    'deepseek/deepseek-v3:free',
+    'deepseek/deepseek-coder:free',
+    'qwen/qwen-14b:free'
+]
+
+CHEAP_MODELS = [
+    'mistral/mistral-small-3.1',  # $0.06 input / $0.22 output
+    'deepseek/deepseek-v3.1-terminus',  # $0.07 input / $1.10 output
+    'qwen/qwen3-14b'  # $0.15 input / $0.60 output
+]
+
+WORKER_TIMEOUT = 300  # 5 minutes timeout
+MAX_WORKERS = 3  # Maximum workers allowed
 
 @app.route('/')
 def index():
@@ -102,9 +124,23 @@ def get_status():
 def get_worker_details():
     """Get detailed information about all workers"""
     workers = []
+    current_time = time.time()
+    
     for worker_id, info in worker_processes.items():
         process = info['process']
         status = 'active' if process.poll() is None else 'stopped'
+        
+        # Get health status
+        health = worker_health.get(worker_id, {'status': 'unknown'})
+        last_heartbeat = info.get('last_heartbeat', info['start_time'])
+        time_since_heartbeat = current_time - last_heartbeat
+        
+        # Determine if worker is problematic
+        is_problematic = (
+            status == 'stopped' or 
+            health.get('status') == 'timeout' or
+            time_since_heartbeat > WORKER_TIMEOUT
+        )
         
         # Get process info
         cpu_percent = 0
@@ -115,7 +151,7 @@ def get_worker_details():
         except:
             pass
 
-        # Simulate model assignment (in real implementation, this would come from worker)
+        # Get model assignment
         model = assign_worker_model()
         
         # Get pricing info
@@ -129,6 +165,9 @@ def get_worker_details():
             'id': worker_id,
             'pid': info['pid'],
             'status': status,
+            'health_status': health.get('status', 'unknown'),
+            'time_since_heartbeat': round(time_since_heartbeat, 0),
+            'is_problematic': is_problematic,
             'start_time': info['start_time'],
             'model': model,
             'cpu_percent': round(cpu_percent, 1),
@@ -138,22 +177,28 @@ def get_worker_details():
             'cost_spent': worker_cost,
             'tokens_used': calculate_worker_tokens(info),
             'current_task': get_worker_current_task(worker_id),
-            'response_time': calculate_response_time(worker_id)
+            'response_time': calculate_response_time(worker_id),
+            'message': health.get('message', '')
         }
         workers.append(worker_detail)
     
     return workers
 
 def assign_worker_model():
-    """Simulate worker model assignment"""
-    # In a real implementation, this would be based on task complexity
-    models = [
-        'minimax/minimax-m2',
-        'deepseek/deepseek-v3.1',
-        'moonshotai/kimi-k2-thinking',
-        'qwen/qwen3-32b:thinking'
-    ]
-    return models[len(worker_processes) % len(models)]
+    """Smart model assignment: FREE first, then CHEAP"""
+    # Count current free vs paid models
+    free_count = sum(1 for w in worker_processes.values() if is_free_model(w.get('model', '')))
+    
+    # If no free models assigned yet, use free
+    if free_count == 0:
+        return FREE_MODELS[len(worker_processes) % len(FREE_MODELS)]
+    # If we have some free models, use cheap models
+    else:
+        return CHEAP_MODELS[len(worker_processes) % len(CHEAP_MODELS)]
+
+def is_free_model(model_id):
+    """Check if model is free tier"""
+    return any(free_model in model_id for free_model in FREE_MODELS)
 
 def calculate_worker_cost(worker_info, pricing):
     """Calculate approximate cost for a worker based on runtime"""
@@ -267,6 +312,47 @@ def stop_worker():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/stop-worker-revert', methods=['POST'])
+def stop_worker_revert():
+    """Stop worker and revert its task back to queue"""
+    data = request.json
+    worker_id = data.get('worker_id')
+    
+    if worker_id not in worker_processes:
+        return jsonify({'success': False, 'error': 'Worker not found'}), 404
+    
+    try:
+        worker_info = worker_processes[worker_id]
+        process = worker_info['process']
+        
+        # Get the task this worker was working on
+        current_task = get_worker_current_task(worker_id)
+        
+        # Stop the worker process
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+        
+        # Revert task back to queue if we have it
+        if current_task and current_task != "Idle - waiting for tasks":
+            task_data = json.dumps(current_task)
+            redis_client.lpush('worker_queue', task_data)
+            print(f"Reverted task back to queue from {worker_id}")
+        
+        # Clean up
+        if worker_id in worker_health:
+            del worker_health[worker_id]
+        del worker_processes[worker_id]
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Worker {worker_id} stopped, task reverted to queue',
+            'reverted_task': current_task
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/workers')
 def get_workers():
     workers_info = []
@@ -284,23 +370,98 @@ def get_workers():
     
     return jsonify({'workers': workers_info})
 
+@app.route('/api/worker-health')
+def get_worker_health():
+    """Get detailed worker health information"""
+    health_data = []
+    current_time = time.time()
+    
+    for worker_id, info in worker_processes.items():
+        process = info['process']
+        status = 'active' if process.poll() is None else 'stopped'
+        
+        # Get health status
+        health = worker_health.get(worker_id, {'status': 'unknown'})
+        last_heartbeat = info.get('last_heartbeat', info['start_time'])
+        time_since_heartbeat = current_time - last_heartbeat
+        
+        # Determine if worker is problematic
+        is_problematic = (
+            status == 'stopped' or 
+            health.get('status') == 'timeout' or
+            time_since_heartbeat > WORKER_TIMEOUT
+        )
+        
+        health_data.append({
+            'id': worker_id,
+            'status': status,
+            'health_status': health.get('status', 'unknown'),
+            'time_since_heartbeat': round(time_since_heartbeat, 0),
+            'is_problematic': is_problematic,
+            'message': health.get('message', ''),
+            'model': assign_worker_model(),
+            'cost_spent': calculate_worker_cost(info, MODEL_PRICING.get(assign_worker_model(), {})),
+            'last_update': health.get('last_check', 0)
+        })
+    
+    return jsonify({'workers_health': health_data})
+
 @app.route('/api/parse-prd', methods=['POST'])
 def parse_prd():
     try:
         data = request.json
         prd_text = data.get('prd', '')
+        project_name = data.get('project_name', '').strip()
         
         if not prd_text.strip():
             return jsonify({'success': False, 'error': 'PRD text is empty'}), 400
         
-        # Parse the PRD and extract tasks
-        tasks = parse_prd_to_tasks(prd_text)
-        
-        return jsonify({
-            'success': True,
-            'tasks': tasks,
-            'count': len(tasks)
-        })
+        # Create a new project folder for the parsed PRD
+        if project_name:
+            # Clean project name
+            project_name = re.sub(r'[^\w\-_]', '_', project_name)
+            project_name = project_name.lower()
+            
+            # Get the workspaces directory
+            base_dir = os.path.dirname(os.path.dirname(WORKSPACE_PATH))  # Go up to Agentic_Work_Shop
+            workspaces_dir = os.path.join(base_dir, 'dev_workspaces')
+            new_project_path = os.path.join(workspaces_dir, project_name)
+            
+            # Create the project directory
+            if not os.path.exists(workspaces_dir):
+                os.makedirs(workspaces_dir)
+                
+            if os.path.exists(new_project_path):
+                return jsonify({'success': False, 'error': f'Project "{project_name}" already exists'}), 400
+            
+            os.makedirs(new_project_path)
+            
+            # Create basic project structure
+            create_basic_project_structure(new_project_path, project_name)
+            
+            # Add project_path to each task
+            tasks = parse_prd_to_tasks(prd_text, new_project_path)
+            for task in tasks:
+                task['project_path'] = new_project_path
+                task['project_name'] = project_name
+            
+            return jsonify({
+                'success': True,
+                'tasks': tasks,
+                'count': len(tasks),
+                'project_created': True,
+                'project_path': new_project_path,
+                'project_name': project_name
+            })
+        else:
+            # Parse without creating a project folder
+            tasks = parse_prd_to_tasks(prd_text, None)
+            return jsonify({
+                'success': True,
+                'tasks': tasks,
+                'count': len(tasks),
+                'project_created': False
+            })
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -335,7 +496,7 @@ def enqueue_task():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-def parse_prd_to_tasks(prd_text):
+def parse_prd_to_tasks(prd_text, project_path=None):
     """Parse PRD text into actionable tasks"""
     tasks = []
     
@@ -436,37 +597,151 @@ def determine_target_files(instruction, clean_line):
     instruction_lower = instruction.lower()
     clean_lower = clean_line.lower()
     
-    # File type patterns
+    # File type patterns (using the standard project structure we create)
     if any(keyword in instruction_lower for keyword in ['api', 'endpoint', 'server', 'backend']):
-        return ['api/main.py', 'api/routes.py']
+        return ['src/api/main.py', 'src/api/routes.py']
     elif any(keyword in instruction_lower for keyword in ['ui', 'interface', 'component', 'frontend', 'web']):
-        return ['frontend/index.html', 'frontend/style.css', 'frontend/script.js']
+        return ['src/frontend/index.html', 'src/frontend/style.css', 'src/frontend/script.js']
     elif any(keyword in instruction_lower for keyword in ['database', 'model', 'schema', 'sql']):
-        return ['database/models.py', 'database/migrations.py']
+        return ['src/database/models.py', 'src/database/migrations.py']
     elif any(keyword in instruction_lower for keyword in ['test', 'testing', 'spec']):
         return ['tests/test_implementation.py', 'tests/conftest.py']
     elif any(keyword in instruction_lower for keyword in ['config', 'configuration', 'settings']):
         return ['config/settings.py', 'config/environment.py']
     elif any(keyword in instruction_lower for keyword in ['auth', 'login', 'user', 'authentication']):
-        return ['auth/user.py', 'auth/middleware.py', 'auth/routes.py']
+        return ['src/auth/user.py', 'src/auth/middleware.py', 'src/auth/routes.py']
     elif any(keyword in instruction_lower for keyword in ['docker', 'deploy', 'deployment']):
         return ['Dockerfile', 'docker-compose.yml', 'deploy.sh']
     else:
         return ['src/main.py', 'src/utils.py']
 
-def check_worker_health():
-    """Check if any workers have died and clean them up"""
-    dead_workers = []
-    for worker_id, info in worker_processes.items():
-        if info['process'].poll() is not None:  # Process has exited
-            dead_workers.append(worker_id)
+def create_basic_project_structure(project_path, project_name):
+    """Create basic project structure for new projects"""
+    # Create basic directories
+    directories = [
+        'src',
+        'tests', 
+        'docs',
+        'config'
+    ]
     
-    for worker_id in dead_workers:
-        del worker_processes[worker_id]
-        print(f"Cleaned up dead worker {worker_id}")
+    for directory in directories:
+        dir_path = os.path.join(project_path, directory)
+        os.makedirs(dir_path, exist_ok=True)
+    
+    # Create basic files
+    files_to_create = {
+        'README.md': f"""# {project_name.replace('_', ' ').title()}
+
+## Project Overview
+This project was generated from a PRD and contains the basic structure for development.
+
+## Directory Structure
+- `src/` - Source code
+- `tests/` - Test files  
+- `docs/` - Documentation
+- `config/` - Configuration files
+
+## Getting Started
+TODO: Add setup instructions
+
+""",
+        'requirements.txt': """# Add your dependencies here
+""",
+        '.gitignore': """# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Node.js (if needed)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+""",
+        'src/main.py': f'"""Main module for {project_name}"""\n\n\ndef main():\n    """Main entry point"""  \n    pass\n\n\nif __name__ == "__main__":\n    main()\n',
+        'tests/test_main.py': f'"""Tests for {project_name}"""\n\ndef test_main():\n    """Test main functionality"""  \n    assert True\n'
+    }
+    
+    for file_path, content in files_to_create.items():
+        full_path = os.path.join(project_path, file_path)
+        with open(full_path, 'w') as f:
+            f.write(content)
+    
+    # Make main.py executable on Unix systems
+    main_py_path = os.path.join(project_path, 'src', 'main.py')
+    if os.name == 'posix':
+        os.chmod(main_py_path, 0o755)
+    
+    print(f"Created project structure for: {project_name} at {project_path}")
+
+def check_worker_health():
+    """Check worker health and mark unhealthy workers"""
+    current_time = time.time()
+    for worker_id, info in list(worker_processes.items()):
+        process = info['process']
+        last_heartbeat = info.get('last_heartbeat', info['start_time'])
+        
+        # Check if worker is alive
+        if process.poll() is not None:
+            # Worker died, mark as unhealthy
+            if worker_id not in worker_health:
+                worker_health[worker_id] = {'status': 'stopped', 'last_check': current_time}
+            continue
+        
+        # Check if worker is responsive
+        time_since_heartbeat = current_time - last_heartbeat
+        if time_since_heartbeat > WORKER_TIMEOUT:
+            # Worker not responding
+            worker_health[worker_id] = {
+                'status': 'timeout', 
+                'last_check': current_time,
+                'message': f'No response for {int(time_since_heartbeat)}s'
+            }
+        else:
+            # Worker is healthy
+            worker_health[worker_id] = {
+                'status': 'healthy',
+                'last_check': current_time
+            }
 
 def monitor_queues():
-    """Monitor Redis queues and auto-scale workers"""
+    """Monitor Redis queues with strict cost controls"""
     global monitoring_active
     
     while monitoring_active:
@@ -479,22 +754,21 @@ def monitor_queues():
             queue_depth = redis_client.llen('worker_queue') or 0
             active_workers = len([w for w in worker_processes.values() if w['process'].poll() is None])
             
-            # Auto-scaling logic
-            if queue_depth > 0 and active_workers == 0:
-                print(f"Tasks in queue ({queue_depth}) but no active workers. Spawning worker...")
+            # STRICT COST CONTROL: Only spawn workers if conditions are met
+            if queue_depth > 0 and active_workers == 0 and len(worker_processes) < MAX_WORKERS:
+                print(f"Queue has {queue_depth} tasks, spawning cost-controlled worker...")
                 spawn_worker()
-            elif queue_depth > 5 and active_workers < 3:  # Max 3 workers
-                print(f"High queue depth ({queue_depth}) with {active_workers} workers. Adding worker...")
+            elif queue_depth > 2 and active_workers < 2 and len(worker_processes) < MAX_WORKERS:
+                print(f"High queue depth ({queue_depth}), adding 2nd worker...")
                 spawn_worker()
-            elif queue_depth == 0 and active_workers > 1:
-                print(f"No tasks in queue with {active_workers} workers. Consider stopping some workers.")
+            # NO MORE AUTO-SCALING beyond 3 workers!
             
             check_worker_health()
-            time.sleep(10)  # Check every 10 seconds
+            time.sleep(30)  # Check every 30 seconds (reduced frequency)
             
         except Exception as e:
             print(f"Monitor error: {e}")
-            time.sleep(10)
+            time.sleep(30)
 
 def start_monitoring():
     global monitoring_active, monitor_thread
@@ -508,6 +782,11 @@ def stop_monitoring():
     global monitoring_active
     monitoring_active = False
     print("Queue monitoring stopped")
+
+# EMERGENCY: DISABLE AUTO-SCALING TO PREVENT MONEY WASTE
+monitoring_active = False
+# max_workers = 0  # TEMPORARILY DISABLE ALL WORKER SPAWNING
+# auto_scaling_enabled = False
 
 # Start monitoring when the app starts
 start_monitoring()

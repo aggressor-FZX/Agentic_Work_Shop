@@ -20,6 +20,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const parsePrdBtn = document.getElementById('parse-prd-btn');
     const clearPrdBtn = document.getElementById('clear-prd-btn');
     const prdResults = document.getElementById('prd-results');
+    const projectNameInput = document.getElementById('project-name-input');
+
+    // Add emergency stop button
+    const emergencyStopBtn = document.getElementById('emergency-stop-btn');
 
     // Track worker data
     let workerData = [];
@@ -95,6 +99,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 // Update worker buttons state
                 removeWorkerBtn.disabled = (data.worker_count || 0) === 0;
+                
+                // Update active worker count display
+                document.getElementById('active-workers-count').textContent = data.worker_count || 0;
+                
+                // Update add worker button state based on current limit
+                updateAddWorkerButtonState();
             })
             .catch(error => console.error('Error fetching status:', error));
     }
@@ -157,14 +167,24 @@ document.addEventListener('DOMContentLoaded', function() {
             const card = document.createElement('div');
             card.className = 'worker-card';
             
+            // Add problematic indicator
+            if (worker.is_problematic) {
+                card.classList.add('worker-problematic');
+            }
+            
             const status = worker.status || 'unknown';
             const modelInfo = getWorkerModelInfo(worker.model);
             const costInfo = calculateWorkerCost(worker);
             
+            // Format response time
+            const responseTime = formatResponseTime(worker.time_since_heartbeat * 1000);
+            
             card.innerHTML = `
                 <div class="worker-header">
                     <div class="worker-id">${worker.id}</div>
-                    <div class="worker-status ${status}">${status}</div>
+                    <div class="worker-status ${status} ${worker.is_problematic ? 'problematic' : ''}">
+                        ${worker.is_problematic ? '⚠️' : '✅'} ${status}
+                    </div>
                 </div>
                 
                 <div class="worker-model">${modelInfo.name}</div>
@@ -174,10 +194,27 @@ document.addEventListener('DOMContentLoaded', function() {
                     ${worker.current_task || 'Idle - waiting for tasks'}
                 </div>
                 
+                <div class="worker-health">
+                    <span class="health-status ${worker.health_status}">
+                        Health: ${worker.health_status}
+                    </span>
+                    <span class="response-time">
+                        Last: ${responseTime}
+                    </span>
+                </div>
+                
                 <div class="task-stats">
                     <span>Uptime: ${formatUptime(worker.start_time)}</span>
                     <span>${worker.tokens_used || 0} tokens</span>
                 </div>
+                
+                <div class="worker-actions">
+                    <button class="btn-stop-worker" onclick="stopWorkerAndRevert('${worker.id}')">
+                        🛑 Stop & Revert Task
+                    </button>
+                </div>
+                
+                ${worker.message ? `<div class="worker-message">${worker.message}</div>` : ''}
             `;
             workerGridEl.appendChild(card);
         });
@@ -238,29 +275,120 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function addWorker() {
-        addWorkerBtn.disabled = true;
-        addWorkerBtn.textContent = '⏳ Starting...';
+        // Get current worker limit from slider
+        const workerLimit = document.getElementById('worker-limit-slider').value;
         
-        fetch('/api/spawn-worker', { method: 'POST' })
+        // Check current worker count
+        fetch('/api/status')
             .then(response => response.json())
             .then(data => {
-                addWorkerBtn.disabled = false;
-                addWorkerBtn.textContent = '➕ Add Worker';
+                const currentWorkers = data.worker_count || 0;
+                const maxWorkers = parseInt(workerLimit);
                 
-                if (data.success) {
-                    console.log('Worker spawned:', data);
-                    showAutoScalingIndicator();
-                    updateStatus();
-                } else {
-                    alert('Failed to spawn worker: ' + data.error);
+                if (currentWorkers >= maxWorkers) {
+                    alert(`⚠️ Cost control: Maximum ${maxWorkers} workers allowed to prevent money waste. Current: ${currentWorkers}`);
+                    return;
                 }
-            })
-            .catch(error => {
-                addWorkerBtn.disabled = false;
-                addWorkerBtn.textContent = '➕ Add Worker';
-                console.error('Error:', error);
-                alert('Error spawning worker');
+                
+                // Proceed with worker spawning
+                addWorkerBtn.disabled = true;
+                addWorkerBtn.textContent = '⏳ Starting (Cost Controlled)...';
+                
+                fetch('/api/spawn-worker', { method: 'POST' })
+                    .then(response => response.json())
+                    .then(data => {
+                        addWorkerBtn.disabled = false;
+                        addWorkerBtn.textContent = '➕ Add Worker (Cost Controlled)';
+                        
+                        if (data.success) {
+                            console.log('Cost-controlled worker spawned:', data);
+                            showAutoScalingIndicator();
+                            updateStatus();
+                        } else {
+                            alert('Failed to spawn worker: ' + data.error);
+                        }
+                    })
+                    .catch(error => {
+                        addWorkerBtn.disabled = false;
+                        addWorkerBtn.textContent = '➕ Add Worker (Cost Controlled)';
+                        console.error('Error:', error);
+                        alert('Error spawning worker');
+                    });
             });
+    }
+
+    // Worker limit slider functionality
+    function updateWorkerLimit(limit) {
+        document.getElementById('current-limit').textContent = limit;
+        document.getElementById('active-workers-count').textContent = getActiveWorkerCount();
+        
+        // Save to localStorage
+        localStorage.setItem('workerLimit', limit);
+        
+        // Apply the limit
+        applyWorkerLimit(parseInt(limit));
+        
+        // Update add worker button state
+        updateAddWorkerButtonState();
+    }
+    
+    function getActiveWorkerCount() {
+        const workerGrid = document.getElementById('worker-grid');
+        if (!workerGrid) return 0;
+        return workerGrid.querySelectorAll('.worker-card:not(.inactive)').length;
+    }
+    
+    function applyWorkerLimit(limit) {
+        // Check if current workers exceed new limit
+        const currentWorkers = getActiveWorkerCount();
+        if (currentWorkers > limit) {
+            const excess = currentWorkers - limit;
+            console.log(`⚠️ Worker limit reduced. ${excess} workers exceeding new limit.`);
+            
+            // Show notification (could be enhanced with a proper toast system)
+            const notification = document.createElement('div');
+            notification.className = 'limit-exceeded-notification';
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: #ffc107;
+                color: #000;
+                padding: 15px;
+                border-radius: 8px;
+                z-index: 1000;
+                box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            `;
+            notification.textContent = `⚠️ Worker limit set to ${limit}. Currently running ${currentWorkers} workers. Consider removing excess workers.`;
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                document.body.removeChild(notification);
+            }, 5000);
+        }
+    }
+    
+    function updateAddWorkerButtonState() {
+        const currentWorkers = getActiveWorkerCount();
+        const limit = document.getElementById('worker-limit-slider').value;
+        
+        if (currentWorkers >= parseInt(limit)) {
+            addWorkerBtn.disabled = true;
+            addWorkerBtn.textContent = '➕ Add Worker (Limit Reached)';
+        } else {
+            addWorkerBtn.disabled = false;
+            addWorkerBtn.textContent = '➕ Add Worker (Cost Controlled)';
+        }
+    }
+    
+    // Load saved worker limit
+    function loadWorkerLimit() {
+        const savedLimit = localStorage.getItem('workerLimit');
+        if (savedLimit) {
+            const slider = document.getElementById('worker-limit-slider');
+            slider.value = savedLimit;
+            updateWorkerLimit(savedLimit);
+        }
     }
 
     function removeWorker() {
@@ -289,8 +417,49 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     }
 
+    function emergencyStopAll() {
+        if (!confirm('🚨 EMERGENCY: Stop all workers to prevent cost waste? This will stop ALL active workers.')) {
+            return;
+        }
+        
+        emergencyStopBtn.disabled = true;
+        emergencyStopBtn.textContent = '⏳ Stopping All...';
+        
+        fetch('/api/workers')
+            .then(response => response.json())
+            .then(data => {
+                let stoppedCount = 0;
+                const totalWorkers = data.workers.length;
+                
+                data.workers.forEach(worker => {
+                    fetch('/api/stop-worker', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ worker_id: worker.id })
+                    })
+                    .then(response => response.json())
+                    .then(result => {
+                        stoppedCount++;
+                        if (stoppedCount === totalWorkers) {
+                            emergencyStopBtn.disabled = false;
+                            emergencyStopBtn.textContent = '🛑 Emergency Stop All';
+                            alert(`🚨 Emergency stop complete! Stopped ${totalWorkers} workers.`);
+                            updateStatus();
+                        }
+                    });
+                });
+            })
+            .catch(error => {
+                emergencyStopBtn.disabled = false;
+                emergencyStopBtn.textContent = '🛑 Emergency Stop All';
+                console.error('Error in emergency stop:', error);
+            });
+    }
+
     function parsePRD() {
         const prdText = prdInput.value.trim();
+        const projectName = projectNameInput.value.trim();
+        
         if (!prdText) {
             showPRDMessage('Please paste a PRD first.', 'error');
             return;
@@ -299,31 +468,41 @@ document.addEventListener('DOMContentLoaded', function() {
         parsePrdBtn.disabled = true;
         parsePrdBtn.textContent = '⏳ Parsing...';
         
+        const requestData = { prd: prdText };
+        if (projectName) {
+            requestData.project_name = projectName;
+        }
+        
         fetch('/api/parse-prd', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prd: prdText })
+            body: JSON.stringify(requestData)
         })
         .then(response => response.json())
         .then(data => {
             parsePrdBtn.disabled = false;
-            parsePrdBtn.textContent = '🔍 Parse PRD';
+            parsePrdBtn.textContent = '🔍 Parse PRD & Create Project';
             
             if (data.success) {
-                displayParsedTasks(data.tasks);
-                showPRDMessage(`Successfully parsed ${data.tasks.length} tasks!`, 'success');
+                displayParsedTasks(data.tasks, data);
+                
+                let message = `Successfully parsed ${data.tasks.length} tasks!`;
+                if (data.project_created) {
+                    message += ` Project "${data.project_name}" created in dev_workspaces/`;
+                }
+                showPRDMessage(message, 'success');
             } else {
                 showPRDMessage('Failed to parse PRD: ' + data.error, 'error');
             }
         })
         .catch(error => {
             parsePrdBtn.disabled = false;
-            parsePrdBtn.textContent = '🔍 Parse PRD';
+            parsePrdBtn.textContent = '🔍 Parse PRD & Create Project';
             showPRDMessage('Error parsing PRD: ' + error.message, 'error');
         });
     }
 
-    function displayParsedTasks(tasks) {
+    function displayParsedTasks(tasks, projectData = null) {
         prdResults.innerHTML = '';
         
         if (tasks.length === 0) {
@@ -331,12 +510,33 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
+        // Show project creation info if available
+        if (projectData && projectData.project_created) {
+            const projectInfo = document.createElement('div');
+            projectInfo.className = 'project-info';
+            projectInfo.innerHTML = `
+                <div class="project-success">
+                    <h3>📁 Project Created Successfully!</h3>
+                    <p><strong>Name:</strong> ${projectData.project_name}</p>
+                    <p><strong>Path:</strong> ${projectData.project_path}</p>
+                    <p><strong>Status:</strong> Ready for development</p>
+                </div>
+            `;
+            prdResults.appendChild(projectInfo);
+        }
+
         tasks.forEach((task, index) => {
             const taskDiv = document.createElement('div');
             taskDiv.className = 'prd-task';
+            
+            // Add project path to task display if available
+            const taskPathInfo = projectData && projectData.project_created ? 
+                `<small>Project: ${projectData.project_name}</small>` : '';
+            
             taskDiv.innerHTML = `
                 <h4>Task ${index + 1}: ${task.title}</h4>
                 <p>${task.instruction}</p>
+                ${taskPathInfo}
                 <small>Target: ${task.target_paths.join(', ')}</small>
                 <div class="task-stats">
                     <span class="task-priority ${task.priority}">${task.priority}</span>
@@ -414,10 +614,11 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(data => {
                 const queueDepth = data.queue_depth || 0;
                 const workerCount = data.worker_count || 0;
+                const currentLimit = document.getElementById('worker-limit-slider').value;
                 
                 if (queueDepth > 0 && workerCount === 0) {
                     showAutoScalingIndicator();
-                } else if (queueDepth > 5 && workerCount < 3) {
+                } else if (queueDepth > 5 && workerCount < parseInt(currentLimit)) {
                     showAutoScalingIndicator();
                 }
             });
@@ -429,11 +630,24 @@ document.addEventListener('DOMContentLoaded', function() {
     refreshBtn.addEventListener('click', updateStatus);
     parsePrdBtn.addEventListener('click', parsePRD);
     clearPrdBtn.addEventListener('click', clearPRD);
+    emergencyStopBtn.addEventListener('click', emergencyStopAll);
+    
+    // Worker limit slider
+    const workerLimitSlider = document.getElementById('worker-limit-slider');
+    if (workerLimitSlider) {
+        workerLimitSlider.addEventListener('input', (e) => {
+            updateWorkerLimit(e.target.value);
+        });
+    }
 
     // Auto-scaling indicator
     setInterval(updateScalingIndicator, 10000);
 
     // Initial load and periodic refresh
+    loadWorkerLimit();
     updateStatus();
-    setInterval(updateStatus, 5000); // Refresh every 5 seconds
+    setInterval(() => {
+        updateStatus();
+        updateAddWorkerButtonState();
+    }, 5000); // Refresh every 5 seconds
 });

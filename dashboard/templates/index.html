@@ -10,6 +10,11 @@
     <div class="container">
         <h1>🚀 Agentic Work Shop Dashboard</h1>
         
+        <!-- Emergency cost warning -->
+        <div class="cost-warning">
+            ⚠️ <strong>COST OPTIMIZATION MODE</strong> - Max 3 workers, Free models prioritized
+        </div>
+        
         <div class="stats-grid">
             <div class="stat-card">
                 <h3>Tasks in Queue</h3>
@@ -44,14 +49,38 @@
             </div>
         </div>
 
+        <div class="worker-limit-control">
+            <div class="limit-header">
+                <h3>🎛️ Worker Limit Control</h3>
+                <span class="limit-value">Current Limit: <strong id="current-limit">3</strong></span>
+            </div>
+            <div class="slider-container">
+                <input type="range" id="worker-limit-slider" min="1" max="10" value="3" class="limit-slider">
+                <div class="slider-labels">
+                    <span>1 (Minimal)</span>
+                    <span>10 (High Cost)</span>
+                </div>
+            </div>
+            <div class="limit-info">
+                <small>💡 Set maximum workers to control costs. Current active: <span id="active-workers-count">0</span></small>
+            </div>
+        </div>
+
         <div class="controls">
-            <button id="add-worker-btn" class="btn-primary">➕ Add Worker</button>
+            <button id="add-worker-btn" class="btn-primary" disabled>➕ Add Worker (Cost Controlled)</button>
             <button id="remove-worker-btn" class="btn-secondary">➖ Remove Worker</button>
             <button id="refresh-btn" class="btn-info">🔄 Refresh</button>
+            <button id="emergency-stop-btn" class="btn-danger">🛑 Emergency Stop All</button>
         </div>
 
         <div class="section">
-            <h2>🤖 Worker Status</h2>
+            <h2>🤖 Worker Status & Health</h2>
+            <div class="worker-info">
+                <div class="cost-optimization-info">
+                    💰 <strong>Cost Strategy:</strong> Free models first, then cheapest (Mistral Small: $0.06 input/$0.22 output)
+                    <br>⏱️ <strong>Worker Timeout:</strong> 5 minutes - problematic workers turn red
+                </div>
+            </div>
             <div id="worker-grid" class="worker-grid">
                 <div class="worker-card">
                     <p>No active workers</p>
@@ -62,9 +91,17 @@
         <div class="section">
             <h2>📄 PRD Parser</h2>
             <div class="prd-parser">
-                <textarea id="prd-input" placeholder="Paste your Product Requirements Document (PRD) here...&#10;&#10;Example:&#10;- Create a user authentication system&#10;- Add email verification&#10;- Implement password reset functionality&#10;- Create user dashboard with profile management"></textarea>
+                <div class="prd-input-group">
+                    <label for="prd-input">Product Requirements Document:</label>
+                    <textarea id="prd-input" placeholder="Paste your Product Requirements Document (PRD) here...&#10;&#10;Example:&#10;- Create a user authentication system&#10;- Add email verification&#10;- Implement password reset functionality&#10;- Create user dashboard with profile management"></textarea>
+                </div>
+                <div class="prd-project-name">
+                    <label for="project-name-input">New Project Name (optional):</label>
+                    <input type="text" id="project-name-input" placeholder="e.g., user_authentication_system">
+                    <small>💡 Leave empty to parse without creating a project folder</small>
+                </div>
                 <div class="prd-controls">
-                    <button id="parse-prd-btn" class="btn-primary">🔍 Parse PRD</button>
+                    <button id="parse-prd-btn" class="btn-primary">🔍 Parse PRD & Create Project</button>
                     <button id="clear-prd-btn" class="btn-secondary">🗑️ Clear</button>
                 </div>
                 <div id="prd-results" class="prd-results"></div>
@@ -83,13 +120,13 @@
         <div class="section">
             <h2>📊 Live Logs</h2>
             <div id="live-log" class="log-container">
-                <div class="log-line">Dashboard initialized. Waiting for events...</div>
+                <div class="log-line">Cost-optimized dashboard initialized. Auto-scaling limited to prevent money waste.</div>
             </div>
         </div>
     </div>
 
     <div id="auto-scaling-indicator" class="auto-scaling-indicator">
-        🤖 Auto-scaling active
+        🤖 Cost-controlled auto-scaling active
     </div>
 
     <script src="/static/script.js"></script>
