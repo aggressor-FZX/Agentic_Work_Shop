@@ -1,0 +1,224 @@
+{
+  "open_router_models": {
+    "metadata": {
+      "pricing_source": "OpenRouter API + Provider Pass-through",
+      "last_updated": "2025-11-09",
+      "currency": "USD per 1M tokens",
+      "notes": "OpenRouter adds 5.5% fee ($0.80 minimum) when purchasing credits. Free models are rate-limited: 50 req/day (no credits) or 1000 req/day (with ≥$10 credits)."
+    },
+    "free_tier_models": [
+      {
+        "id": "deepseek/deepseek-r1-0528-qwen3-8b:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "64K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "deepseek/deepseek-v3:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "64K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "deepseek/deepseek-coder-v2:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "64K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "deepseek/deepseek-coder:14b:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "32K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "deepseek/deepseek-chat:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "64K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "qwen/qwen3-vl-32b-instruct:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "260K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "qwen/qwen3-vl-32b-thinking:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "260K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "qwen/qwen3-14b:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "32K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "agentica-org/deepcoder-14b-preview:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "32K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "meta-llama/llama-4-maverick:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "128K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "tngtech/deepseek-r1t2-chimera:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "64K",
+        "notes": "Free tier, rate-limited"
+      },
+      {
+        "id": "minimax/minimax-m2:free",
+        "input_cost": 0,
+        "output_cost": 0,
+        "context_length": "204K",
+        "notes": "Free tier, rate-limited"
+      }
+    ],
+    "cheap_obedient_models": {
+      "level_1_easy_tasks": [
+        {
+          "id": "deepseek/deepseek-coder:33b",
+          "input_cost": 0.28,
+          "output_cost": 0.42,
+          "context_length": "64K",
+          "notes": "Based on DeepSeek V3.2-Exp pricing. Strong for code generation."
+        },
+        {
+          "id": "deepseek/deepseek-v3.1-terminus:exacto",
+          "input_cost": 0.07,
+          "output_cost": 1.10,
+          "context_length": "64K",
+          "notes": "Exacto provider variant. Pricing based on DeepSeek Chat standard rates."
+        }
+      ],
+      "level_2_medium_tasks": [
+        {
+          "id": "deepseek/deepseek-v3.1-terminus",
+          "input_cost": 0.07,
+          "output_cost": 1.10,
+          "context_length": "64K",
+          "notes": "Standard Terminus provider. Use for balanced performance/cost."
+        },
+        {
+          "id": "mistral/mistral-small-3.1",
+          "input_cost": 0.06,
+          "output_cost": 0.22,
+          "context_length": "128K",
+          "notes": "Based on Qwen3-30B-A3B pricing (similar class). Good general-purpose."
+        }
+      ],
+      "level_3_harder_tasks": [
+        {
+          "id": "grok/grok-code-fast-1",
+          "input_cost": 0.20,
+          "output_cost": 0.50,
+          "context_length": "128K",
+          "notes": "Based on xAI Grok-4 Fast Non-Reasoning pricing. Optimized for speed."
+        }
+      ],
+      "level_4_complex_tasks": [
+        {
+          "id": "qwen/qwen3-32b:thinking",
+          "input_cost": 0.29,
+          "output_cost": 0.59,
+          "context_length": "131K",
+          "notes": "Based on Qwen3-32B on Groq pricing. Thinking mode specialized."
+        }
+      ],
+      "level_4_5_advanced_coding": [
+        {
+          "id": "minimax/minimax-m2",
+          "input_cost": 0.255,
+          "output_cost": 1.02,
+          "context_length": "204K",
+          "notes": "Level 4.5 - Stronger coding than typical L4, cheaper than L5. Agentic coding, tool use, SWE-bench optimized"
+        }
+      ],
+      "level_5_hard_coding_tasks": [
+        {
+          "id": "kimi/kimi-k2-thinking",
+          "input_cost": 0.40,
+          "output_cost": 1.20,
+          "context_length": "256K",
+          "notes": "Based on Qwen-Plus pricing. Tool-aware, strong for agentic coding."
+        }
+      ]
+    },
+    "agentic_reasoning_orchestration": [
+      {
+        "id": "moonshotai/kimi-k2-thinking",
+        "input_cost": 0.40,
+        "output_cost": 1.20,
+        "context_length": "256K",
+        "notes": "Based on Qwen-Plus pricing. Kimi models specialized for long-context reasoning."
+      },
+      {
+        "id": "deepseek/deepseek-v3.1",
+        "input_cost": 0.07,
+        "output_cost": 1.10,
+        "context_length": "64K",
+        "notes": "Standard DeepSeek V3.1. Excellent reasoning, general orchestration."
+      },
+      {
+        "id": "qwen/qwen3-coder-480b-a35b-instruct",
+        "input_cost": 0.86,
+        "output_cost": 3.44,
+        "context_length": "200K",
+        "notes": "Based on qwen3-coder-480b-a35b-instruct tiered pricing (32K token tier). Premium coder model."
+      },
+      {
+        "id": "qwen/qwen3-32b:thinking",
+        "input_cost": 0.29,
+        "output_cost": 0.59,
+        "context_length": "131K",
+        "notes": "Duplicate from level 4. Strong reasoning capabilities."
+      },
+      {
+        "id": "tngtech/deepseek-r1t2-chimera",
+        "input_cost": 0.14,
+        "output_cost": 2.19,
+        "context_length": "64K",
+        "notes": "Based on DeepSeek Reasoner pricing. Specialized R1T2 architecture."
+      },
+      {
+        "id": "agentica-org/deepcoder-14b-preview",
+        "input_cost": 0.07,
+        "output_cost": 1.10,
+        "context_length": "32K",
+        "notes": "Based on DeepSeek Chat pricing. Deepcoder variant for coding tasks."
+      },
+      {
+        "id": "mistral/mistral-small-3.1",
+        "input_cost": 0.06,
+        "output_cost": 0.22,
+        "context_length": "128K",
+        "notes": "Good general-purpose model for orchestration tasks."
+      },
+      {
+        "id": "minimax/minimax-m2",
+        "input_cost": 0.255,
+        "output_cost": 1.02,
+        "context_length": "204K",
+        "notes": "Level 4.5 - Stronger coding than typical L4, cheaper than L5. Agentic coding, tool use, SWE-bench optimized"
+      }
+    ]
+  }
+}

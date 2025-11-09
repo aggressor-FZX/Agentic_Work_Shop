@@ -5,12 +5,10 @@ manager.py – Autonomous LangGraph Orchestrator with Supervisor Shell
 from __future__ import annotations
 import os, sys, json, textwrap, subprocess, threading, queue, time, re, shlex
 from typing import List, Literal, TypedDict, Optional
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END
 
-# Load environment variables
-load_dotenv()
+from shared import OrchestratorState, get_llm, log_event
+
+from langgraph.graph import StateGraph, END
 
 # --- Research Tool Pack (safe HTTP + search) ---
 import re, json, time, html
@@ -78,26 +76,43 @@ def arxiv_search(q: str, max_results=5):
     return out
 
 # === CONFIGURATION ===
-LOG_FILE = "manager.log"
-OPENROUTER_BASE = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
-API_KEY = os.getenv("OPENAI_API_KEY")
-# assert API_KEY, "Set OPENAI_API_KEY to your OpenRouter key."  # Commented out for testing
 
-def llm(model: str, temperature: float = 0.2):
-    return ChatOpenAI(
-        base_url=OPENROUTER_BASE,
-        api_key=API_KEY,
-        model=model,
-        temperature=temperature,
-        default_headers={"HTTP-Referer": "http://localhost", "X-Title": "LangGraph-Orchestrator"}
-    )
+from langchain_core.callbacks import BaseCallbackHandler
 
-# === LOGGING UTIL ===
-def log_event(event: str, text: str):
-    line = f"[{time.strftime('%H:%M:%S')}] {event.upper()}: {text.strip()[:5000]}"
-    print(line)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+class TokenUsageCallback(BaseCallbackHandler):
+    def __init__(self):
+        self.total_tokens = 0
+
+    def on_llm_end(self, response, **kwargs):
+        if response.llm_output and 'token_usage' in response.llm_output:
+            self.total_tokens += response.llm_output['token_usage'].get('total_tokens', 0)
+
+token_callback = TokenUsageCallback()
+
+# === PATCH UTIL ===
+def apply_patch(patch_content: str) -> str:
+    """Apply a unified diff patch using the patch command."""
+    import tempfile
+    import subprocess
+    
+    # Write patch to temporary file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.patch', delete=False) as f:
+        f.write(patch_content)
+        patch_file = f.name
+    
+    try:
+        # Apply the patch
+        result = subprocess.run(['patch', '-p1', '--input', patch_file], 
+                              capture_output=True, text=True, cwd='.')
+        if result.returncode == 0:
+            return "SUCCESS: Patch applied successfully"
+        else:
+            return f"FAIL: {result.stderr.strip()}"
+    except FileNotFoundError:
+        return "FAIL: patch command not found. Please install patch utility."
+    finally:
+        # Clean up temp file
+        os.unlink(patch_file)
 
 # === TOOLING (safe runner) ===
 ALLOWED_TOOLS = {
@@ -116,6 +131,10 @@ ALLOWED_TOOLS = {
     "ctest":       lambda args: ["ctest", "-j2", "--output-on-failure", *args],
     # Git helpers (no network by default)
     "git_status":  lambda _: ["git", "status", "--porcelain"],
+    "git_branch":  lambda args: ["git", "branch", *args],
+    "git_checkout": lambda args: ["git", "checkout", *args],
+    "git_add":     lambda args: ["git", "add", *args],
+    "git_commit":  lambda args: ["git", "commit", *args],
 }
 
 # --- Memory Store Tools ---
@@ -131,6 +150,13 @@ ALLOWED_TOOLS.update({
     "web_fetch":   lambda args: ["__PY__", "web_fetch", *args],    # url
     "paper_search":lambda args: ["__PY__", "paper_search", *args], # query, [max_results]
     "context7_docs": lambda args: ["__MCP__", "context7", *args],   # Context7 documentation lookup
+    "task_create": lambda args: ["__PY__", "task_create", *args],  # task_create id title description dependencies
+    "task_update": lambda args: ["__PY__", "task_update", *args],  # task_update id status|field value
+    "task_get": lambda args: ["__PY__", "task_get", *args],        # task_get id
+    "task_list": lambda args: ["__PY__", "task_list", *args],      # task_list [status]
+    "task_expand": lambda args: ["__PY__", "task_expand", *args],  # task_expand prd_text
+    "enqueue_task": lambda args: ["__PY__", "enqueue_task", *args], # enqueue_task queue_name task_json
+    "dequeue_task": lambda args: ["__PY__", "dequeue_task", *args], # dequeue_task queue_name
 })
 
 def run_tool(tool: str, args_or_pkgs=None, cwd=".", timeout=600):
@@ -158,6 +184,80 @@ def run_tool(tool: str, args_or_pkgs=None, cwd=".", timeout=600):
             hits = UM.search(query, topk=topk)
             # compact print
             return (0, json.dumps([{"key":k,"score":s,"value":v} for k,s,v in hits]), "")
+        # Task management ops
+        import datetime
+        TASK_FILE = ".track_task/tasks.json"
+        def load_tasks():
+            try:
+                with open(TASK_FILE, "r") as f:
+                    return json.load(f)
+            except FileNotFoundError:
+                return {}
+        def save_tasks(tasks):
+            os.makedirs(os.path.dirname(TASK_FILE), exist_ok=True)
+            with open(TASK_FILE, "w") as f:
+                json.dump(tasks, f, indent=2)
+        if op == "task_create":
+            task_id, title, desc, deps_json = args[0], args[1], " ".join(args[2:-1]), args[-1]
+            deps = json.loads(deps_json) if deps_json else []
+            tasks = load_tasks()
+            if task_id in tasks:
+                return (1, "TASK_EXISTS", "")
+            tasks[task_id] = {
+                "id": task_id,
+                "title": title,
+                "description": desc,
+                "status": "pending",
+                "dependencies": deps,
+                "created_at": datetime.datetime.now().isoformat(),
+                "updated_at": datetime.datetime.now().isoformat()
+            }
+            save_tasks(tasks)
+            return (0, "CREATED", "")
+        if op == "task_update":
+            task_id, field, value = args[0], args[1], " ".join(args[2:])
+            tasks = load_tasks()
+            if task_id not in tasks:
+                return (1, "TASK_NOT_FOUND", "")
+            if field == "status":
+                tasks[task_id]["status"] = value
+            else:
+                tasks[task_id][field] = value
+            tasks[task_id]["updated_at"] = datetime.datetime.now().isoformat()
+            save_tasks(tasks)
+            return (0, "UPDATED", "")
+        if op == "task_get":
+            task_id = args[0]
+            tasks = load_tasks()
+            task = tasks.get(task_id)
+            return (0, json.dumps(task or {}), "")
+        if op == "task_list":
+            status_filter = args[0] if args else None
+            tasks = load_tasks()
+            filtered = [t for t in tasks.values() if not status_filter or t.get("status") == status_filter]
+            return (0, json.dumps(filtered), "")
+        if op == "enqueue_task":
+            queue_name, task_json = args[0], " ".join(args[1:])
+            UM.r.lpush(queue_name, task_json)
+            return (0, "ENQUEUED", "")
+        if op == "dequeue_task":
+            queue_name = args[0]
+            # Blocking pop with a timeout to avoid waiting forever
+            task = UM.r.brpop(queue_name, timeout=5)
+            if task:
+                return (0, task[1].decode('utf-8'), "")
+            return (0, "EMPTY_QUEUE", "")
+        if op == "task_expand":
+            prd_text = " ".join(args)
+            # Use LLM to expand
+            expander = llm("anthropic/claude-3-haiku")
+            prompt = f"Expand this PRD into detailed tasks with dependencies:\n{prd_text}\n\nOutput JSON array of tasks: [{{id, title, description, dependencies:[]}}]"
+            response = expander.invoke(prompt).content.strip()
+            try:
+                expanded = json.loads(response)
+                return (0, json.dumps(expanded), "")
+            except:
+                return (1, "INVALID_JSON", response)
         try:
             if op == "web_search":
                 q = " ".join(args) if args else ""
@@ -214,18 +314,52 @@ def parse_tool_requests(text: str):
     return requests
 
 # === STATE ===
-class OrchestratorState(TypedDict):
-    goal: str
-    target_paths: List[str]
-    plan: Optional[str]
-    patch: Optional[str]
-    test_result: Optional[str]
-    test_log: Optional[str]
-    iterations: int
+
 
 # === AGENTS ===
+def task_manager_node(state: OrchestratorState):
+    expander = get_llm('pm')
+    prompt = f"""Analyze this goal/PRD and break it into detailed, actionable tasks with dependencies.
+
+Goal: {state['goal']}
+Target Paths: {state['target_paths']}
+
+Output a JSON array of tasks, each with:
+- id: unique string identifier
+- title: short title
+- description: detailed description
+- dependencies: array of task ids this depends on (empty for independent tasks)
+
+Ensure tasks are ordered logically, with foundational tasks first.
+
+Example:
+[
+  {{"id": "setup_env", "title": "Set up development environment", "description": "Install required dependencies and set up project structure", "dependencies": []}},
+  {{"id": "design_api", "title": "Design API endpoints", "description": "Define REST API structure and data models", "dependencies": ["setup_env"]}}
+]
+
+Only output the JSON array, no other text."""
+    response = expander.invoke(prompt).content.strip()
+    try:
+        tasks = json.loads(response)
+        # Create tasks in the system
+        for task in tasks:
+            deps_json = json.dumps(task["dependencies"])
+            rc, out, err = run_tool("task_create", [task["id"], task["title"], task["description"], deps_json])
+            if rc != 0:
+                log_event("task_create_error", f"Failed to create task {task['id']}: {out} {err}")
+        # Set current task to the first one with no dependencies
+        first_task = next((t for t in tasks if not t["dependencies"]), tasks[0] if tasks else None)
+        current_id = first_task["id"] if first_task else None
+        deps = [t["id"] for t in tasks if t["id"] != current_id and current_id in t.get("dependencies", [])]
+        log_event("task_manager", f"Created {len(tasks)} tasks, starting with {current_id}", agent="task_manager")
+        return {**state, "current_task_id": current_id, "task_dependencies": deps}
+    except json.JSONDecodeError as e:
+        log_event("task_expand_error", f"Invalid JSON from LLM: {response}")
+        return {**state, "current_task_id": None, "task_dependencies": []}
+
 def plan_node(state: OrchestratorState):
-    planner = llm("deepseek-v3")
+    planner = get_llm('pm')
     prompt = f"""Plan steps to achieve:
 Goal: {state['goal']}
 Scope: {state['target_paths']}
@@ -242,11 +376,11 @@ If domain knowledge is missing or uncertain, FIRST do research:
 
 Always cite 2–5 sources (store in memory) before proposing architecture in unfamiliar domains."""
     plan = planner.invoke(prompt).content.strip()
-    log_event("plan", plan)
+    log_event("plan", plan, agent="planner")
     return {**state, "plan": plan}
 
 def research_node(state: OrchestratorState):
-    planner = llm("deepseek-v3")  # or your preferred planner model
+    planner = get_llm('pm')  # or your preferred planner model
     prompt = f"""
 Goal: {state['goal']}
 Known constraints: {state.get('constraints','(none)')}
@@ -270,13 +404,13 @@ If no research needed, emit nothing.
     out = planner.invoke(prompt).content
     for tool, args in parse_tool_requests(out):
         rc, so, se = run_tool(tool, args)
-        log_event("research_tool", f"{tool} {args}\nRC={rc}\n{so[:800]}\n{se[:400]}")
+        log_event("research_tool", f"{tool} {args}\nRC={rc}\n{so[:800]}\n{se[:400]}", agent="researcher")
         # Encourage storing condensed notes
     return state
 
 def env_node(state: OrchestratorState):
     # Ask planner to declare minimal tools/deps needed in TOOL: lines
-    planner = llm("deepseek-v3")
+    planner = get_llm('pm')
     prompt = f"""
 You can request tools strictly using 'TOOL: <name> <args>'.
 Allowed tools: pip_install, npm_install, pytest, ruff, black_check, flake8, mypy, cmake_build, ctest.
@@ -290,25 +424,81 @@ TOOL: pip_install pytest ruff
 TOOL: npm_install jest
 """
     plan_tools = planner.invoke(prompt).content
-    log_event("env_tools", plan_tools.strip() or "<none>")
+    log_event("env_tools", plan_tools.strip() or "<none>", agent="env_manager")
 
     for tool, args in parse_tool_requests(plan_tools):
         rc, out, err = run_tool(tool, args)
         log_event("env_exec", f"{tool} {args} -> rc={rc}\n{out[-800:]}\n{err[-800:]}")
     return state
 
-def code_node(state: OrchestratorState):
-    coder = llm("grok-4-fast", 0.1)
+from shared import OrchestratorState
+
+def pm_node(state: OrchestratorState):
+    pm = get_llm('pm', temperature=0.1)
     prompt = f"""
+You are a Product Manager. Your role is to break down the high-level goal into small, actionable sub-tasks for your team of developers.
+
 Goal: {state['goal']}
 Plan:
 {state['plan']}
-Touch only {state['target_paths']}
-Return a single unified diff, no prose.
+
+Decompose this into a series of sub-tasks. For each sub-task, provide:
+1. A unique, descriptive branch name (e.g., feature/add-user-model).
+2. A clear, concise instruction for the developer.
+
+Output this as a JSON array of objects, where each object has a "branch" and "instruction" key.
+Example:
+[\n    {{\"branch\": \"feature/setup-database\", \"instruction\": \"Set up the initial database schema for users.\"}},\n    {{\"branch\": \"feature/user-api-routes\", \"instruction\": \"Create the API routes for user registration and login.\"}}
+]
 """
-    patch = coder.invoke(prompt).content
-    log_event("patch", patch[:600])
-    return {**state, "patch": patch}
+    sub_tasks_json = pm.invoke(prompt).content
+    try:
+        sub_tasks = json.loads(sub_tasks_json)
+        # Enqueue each task instead of storing in state
+        for task in sub_tasks:
+            run_tool("git_branch", [task["branch"]])
+            task_data = json.dumps({
+                "branch": task["branch"],
+                "instruction": task["instruction"],
+                "goal": state['goal'],
+                "target_paths": state['target_paths']
+            })
+            run_tool("enqueue_task", ["worker_queue", task_data])
+        
+        log_event("pm", f"Enqueued {len(sub_tasks)} sub-tasks to worker queue.", agent="pm")
+        # Return state without sub_tasks since they're now in the queue
+        return {**state, "sub_tasks": sub_tasks}  # Keep for monitoring, but workers will dequeue
+    except json.JSONDecodeError:
+        log_event("pm_error", f"Failed to parse sub-tasks from LLM. Raw response: {sub_tasks_json}", agent="pm")
+        return {**state, "sub_tasks": []}
+
+def monitoring_node(state: OrchestratorState):
+    """PM monitors the results queue for completed tasks."""
+    # Check for completed tasks in results queue
+    result = run_tool("dequeue_task", ["results_queue"])
+    if result[0] != 0 or result[1] == "EMPTY_QUEUE":
+        log_event("pm_monitor", "No completed tasks in results queue.", agent="pm")
+        return state
+    
+    try:
+        result_data = json.loads(result[1])
+        branch = result_data["branch"]
+        instruction = result_data["instruction"]
+        status = result_data["status"]
+        
+        if status == "success":
+            log_event("pm_success", f"Task completed: {branch} - {instruction}", agent="pm")
+            # Could merge branch or mark as complete
+            run_tool("git_checkout", ["main"])  # Switch back to main
+            # TODO: Implement branch merging logic
+        else:
+            log_event("pm_failure", f"Task failed: {branch} - {result_data.get('error', 'Unknown error')}", agent="pm")
+            # Could re-queue failed tasks or handle differently
+        
+        return {**state, "last_result": result_data}
+    except (json.JSONDecodeError, KeyError) as e:
+        log_event("pm_monitor_error", f"Invalid result data: {e}", agent="pm")
+        return state
 
 def apply_patch(patch: str):
     if not patch:
@@ -348,11 +538,11 @@ def test_node(state: OrchestratorState):
             rc2, out2, err2 = run_tool("pytest", [])
             passed = (rc2 == 0)
             tail = f"STDOUT:\n{out2[-1000:]}\nSTDERR:\n{err2[-1000:]}"
-    log_event("tests", ("PASS" if passed else "FAIL") + "\n" + tail)
+    log_event("tests", ("PASS" if passed else "FAIL") + "\n" + tail, agent="tester")
     return {**state, "test_result": "PASS" if passed else "FAIL", "test_log": tail}
 
 def review_node(state: OrchestratorState):
-    reviewer = llm("deepseek-v3")
+    reviewer = get_llm('pm')
     prompt = f"""
 Tests: {state['test_result']}
 Logs (tail): {state['test_log'][:2000]}
@@ -368,7 +558,7 @@ If PASS:
 Allowed tools: pip_install, npm_install, pytest, ruff, black_check, flake8, mypy, cmake_build, ctest.
 """
     verdict = reviewer.invoke(prompt).content.strip()
-    log_event("review", verdict)
+    log_event("review", verdict, agent="reviewer")
 
     # Execute any TOOL requests the reviewer emitted
     for tool, args in parse_tool_requests(verdict):
@@ -376,29 +566,70 @@ Allowed tools: pip_install, npm_install, pytest, ruff, black_check, flake8, mypy
         log_event("review_exec", f"{tool} {args} -> rc={rc}\n{out[-600:]}\n{err[-600:]}")
     return {**state, "plan": f"{state.get('plan','')}\nReviewer: {verdict}"}
 
+def task_complete_node(state: OrchestratorState):
+    if state.get("current_task_id") and state.get("test_result") == "PASS" and "FINALIZE" in (state.get("plan") or "").upper():
+        run_tool("task_update", [state["current_task_id"], "status", "completed"])
+        log_event("task_completed", state["current_task_id"])
+        # Find next task
+        rc, out, err = run_tool("task_list", ["pending"])
+        if rc == 0:
+            pending = json.loads(out)
+            completed_ids = {t["id"] for t in json.loads(run_tool("task_list", ["completed"])[1])}
+            next_task = next((t for t in pending if all(d in completed_ids for d in t.get("dependencies", []))), None)
+            if next_task:
+                deps = [t["id"] for t in pending if next_task["id"] in t.get("dependencies", [])]
+                return {**state, "current_task_id": next_task["id"], "task_dependencies": deps, "iterations": 0, "plan": None, "patch": None, "test_result": None, "test_log": None}
+    return state
+
 def should_iterate(state: OrchestratorState) -> Literal["iterate","finish"]:
-    if state["iterations"] >= 3:
+    # For monitoring node: check if all tasks are completed
+    sub_tasks = state.get("sub_tasks", [])
+    if not sub_tasks:
+        return "finish"  # No tasks to monitor
+    
+    # Check results queue for completed tasks
+    completed_branches = set()
+    while True:
+        result = run_tool("dequeue_task", ["results_queue"])
+        if result[0] != 0 or result[1] == "EMPTY_QUEUE":
+            break
+        try:
+            result_data = json.loads(result[1])
+            if result_data["status"] == "success":
+                completed_branches.add(result_data["branch"])
+        except (json.JSONDecodeError, KeyError):
+            continue
+    
+    # If all branches are completed, finish
+    task_branches = {task["branch"] for task in sub_tasks}
+    if task_branches.issubset(completed_branches):
         return "finish"
-    last = (state.get("plan") or "").splitlines()[-1].upper()
-    if "FINALIZE" in last and state.get("test_result") == "PASS":
+    
+    # Otherwise continue monitoring (with timeout)
+    if state["iterations"] >= 10:  # Allow more time for parallel tasks
         return "finish"
+    
     return "iterate"
 
 # === BUILD GRAPH ===
 workflow = StateGraph(OrchestratorState)
 workflow.add_node("plan", plan_node)
 workflow.add_node("research", research_node)
-workflow.add_node("code", code_node)
-workflow.add_node("env", env_node)      # <— NEW
+workflow.add_node("pm", pm_node)
+workflow.add_node("monitor", monitoring_node)
+workflow.add_node("env", env_node)
 workflow.add_node("test", test_node)
 workflow.add_node("review", review_node)
+
 workflow.set_entry_point("plan")
 workflow.add_edge("plan", "research")
-workflow.add_edge("research", "code")
-workflow.add_edge("code", "env")      # <— NEW
-workflow.add_edge("env", "test")      # <— NEW
-workflow.add_edge("test", "review")
-workflow.add_conditional_edges("review", should_iterate, {"iterate": "code", "finish": END})
+workflow.add_edge("research", "pm")
+# After PM enqueues tasks, go to monitoring
+workflow.add_edge("pm", "monitor")
+# Monitoring loop - check for results and continue monitoring
+workflow.add_conditional_edges("monitor", should_iterate, {"iterate": "monitor", "finish": END})
+# Workers can run independently (in parallel processes)
+# The env/test/review nodes remain for final validation
 graph = workflow.compile()
 
 # === SUPERVISOR SHELL ===
@@ -596,6 +827,15 @@ def get_library_docs(library_id: str, topic: str) -> str:
 
 # === MAIN LOOP ===
 def run_manager(goal, scope_paths, max_iter=5):
+    # Create a unique workspace directory for this run
+    workspace_name = re.sub(r'\W+', '_', goal.lower())[:50]
+    workspace_path = os.path.join(os.getcwd(), "dev_workspaces", workspace_name)
+    os.makedirs(workspace_path, exist_ok=True)
+    log_event("workspace", f"Created workspace: {workspace_path}")
+
+    # All file operations should be relative to this workspace
+    os.chdir(workspace_path)
+
     initial_state = OrchestratorState(
         goal=goal,
         target_paths=scope_paths,
@@ -603,7 +843,9 @@ def run_manager(goal, scope_paths, max_iter=5):
         patch=None,
         test_result=None,
         test_log=None,
-        iterations=0
+        iterations=0,
+        current_task_id=None,
+        task_dependencies=[]
     )
     
     # Run the compiled graph
@@ -619,9 +861,31 @@ def run_manager(goal, scope_paths, max_iter=5):
 
 if __name__ == "__main__":
     import sys
+    import subprocess
+    import atexit
+
     goal = sys.argv[1] if len(sys.argv) > 1 else "Refactor src/foo; keep tests green."
     scopes = sys.argv[2:-1] if len(sys.argv) > 3 and sys.argv[-1].isdigit() else sys.argv[2:]
     iters = int(sys.argv[-1]) if (len(sys.argv) > 2 and sys.argv[-1].isdigit()) else 3
     if not scopes: scopes = ["src","tests"]
-    result = run_manager(goal, scopes, max_iter=iters)
+    
+    # Create a unique workspace directory for this run to avoid conflicts
+    workspace_name = re.sub(r'\W+', '_', goal.lower())[:50]
+    workspace_path = os.path.join(os.getcwd(), "dev_workspaces", workspace_name)
+    os.makedirs(workspace_path, exist_ok=True)
+
+    # Start the dashboard server, passing the workspace path
+    dashboard_proc = subprocess.Popen([sys.executable, "dashboard/app.py", "--workspace", workspace_path])
+    atexit.register(dashboard_proc.terminate)
+    
+    original_cwd = os.getcwd()
+    try:
+        result = run_manager(goal, scopes, max_iter=iters)
+    finally:
+        os.chdir(original_cwd)
+        # Write final token count to a log file in the workspace for the dashboard
+        token_log_path = os.path.join(workspace_path, "token_usage.log")
+        with open(token_log_path, "w") as f:
+            f.write(str(token_callback.total_tokens))
+
     print("[result]", result)

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic Work Shop Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Agentic Work Shop Dashboard</h1>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Tasks in Queue</h3>
+                <p id="task-count">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Redis Queue Depth</h3>
+                <p id="queue-depth">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Token Usage</h3>
+                <p id="token-usage">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Active Workers</h3>
+                <p id="worker-count">0</p>
+            </div>
+        </div>
+
+        <div class="cost-summary">
+            <div class="cost-card">
+                <h4>Total Cost</h4>
+                <div class="amount" id="total-cost">$0.00</div>
+            </div>
+            <div class="cost-card">
+                <h4>Free Tier Usage</h4>
+                <div class="amount free" id="free-usage">0%</div>
+            </div>
+            <div class="cost-card">
+                <h4>Average Response Time</h4>
+                <div class="amount" id="avg-response">0ms</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button id="add-worker-btn" class="btn-primary">➕ Add Worker</button>
+            <button id="remove-worker-btn" class="btn-secondary">➖ Remove Worker</button>
+            <button id="refresh-btn" class="btn-info">🔄 Refresh</button>
+        </div>
+
+        <div class="section">
+            <h2>🤖 Worker Status</h2>
+            <div id="worker-grid" class="worker-grid">
+                <div class="worker-card">
+                    <p>No active workers</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>📄 PRD Parser</h2>
+            <div class="prd-parser">
+                <textarea id="prd-input" placeholder="Paste your Product Requirements Document (PRD) here...&#10;&#10;Example:&#10;- Create a user authentication system&#10;- Add email verification&#10;- Implement password reset functionality&#10;- Create user dashboard with profile management"></textarea>
+                <div class="prd-controls">
+                    <button id="parse-prd-btn" class="btn-primary">🔍 Parse PRD</button>
+                    <button id="clear-prd-btn" class="btn-secondary">🗑️ Clear</button>
+                </div>
+                <div id="prd-results" class="prd-results"></div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>📋 Task Status</h2>
+            <div id="task-grid" class="task-grid">
+                <div class="task-card">
+                    <p>No tasks yet</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>📊 Live Logs</h2>
+            <div id="live-log" class="log-container">
+                <div class="log-line">Dashboard initialized. Waiting for events...</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="auto-scaling-indicator" class="auto-scaling-indicator">
+        🤖 Auto-scaling active
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
